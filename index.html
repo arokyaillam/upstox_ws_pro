@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upstox Live Market Dashboard - Real Data</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container { max-width: 1400px; margin: 0 auto; }
+        
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .header h1 { color: #333; display: flex; align-items: center; gap: 10px; }
+        
+        .status-badge {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        .status-connected { background: #10b981; color: white; }
+        .status-disconnected { background: #ef4444; color: white; }
+        .status-connecting { background: #f59e0b; color: white; }
+        
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+            margin-top: 5px;
+        }
+        
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .control-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        
+        input, select, button {
+            padding: 10px 15px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        input { flex: 1; min-width: 250px; }
+        
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        
+        button:hover { background: #5568d3; transform: translateY(-2px); }
+        button:active { transform: scale(0.98); }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        
+        .data-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+        
+        .instrument-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .instrument-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #eee;
+        }
+        
+        .instrument-name {
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .instrument-mode {
+            background: #667eea;
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+        }
+        
+        .price-display {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin: 15px 0;
+        }
+        
+        .ltp {
+            font-size: 32px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .change {
+            font-size: 16px;
+            font-weight: bold;
+        }
+        
+        .change.positive { color: #10b981; }
+        .change.negative { color: #ef4444; }
+        
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 13px;
+        }
+        
+        .data-label { color: #666; }
+        .data-value { color: #333; font-weight: 600; }
+        
+        .market-depth {
+            margin-top: 15px;
+            font-size: 12px;
+        }
+        
+        .depth-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        .depth-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr;
+            gap: 5px;
+            padding: 4px;
+        }
+        
+        .depth-header {
+            font-weight: bold;
+            background: #f5f5f5;
+            padding: 4px;
+            border-radius: 3px;
+        }
+        
+        .bid-price { color: #10b981; }
+        .ask-price { color: #ef4444; }
+        
+        .log-container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .log-entry {
+            padding: 5px;
+            font-size: 12px;
+            font-family: monospace;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .no-data {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-size: 18px;
+        }
+        
+        .remove-btn {
+            background: #ef4444;
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        
+        .remove-btn:hover { background: #dc2626; }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                📊 Upstox Live Market Dashboard
+                <span id="status-badge" class="status-badge status-connecting pulse">Connecting...</span>
+            </h1>
+            
+            <div class="stats-row">
+                <div class="stat-card">
+                    <div class="stat-label">Subscriptions</div>
+                    <div class="stat-value" id="subscription-count">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Messages</div>
+                    <div class="stat-value" id="message-count">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">WS Status</div>
+                    <div class="stat-value" id="ws-status">Connecting</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Last Update</div>
+                    <div class="stat-value" id="last-update">-</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <h3 style="margin-bottom: 15px;">🎛️ Controls</h3>
+            <div class="control-group">
+                <input type="text" id="instrument-input" placeholder="e.g., NSE_INDEX|Nifty 50" list="instrument-suggestions">
+                <datalist id="instrument-suggestions">
+                    <option value="NSE_INDEX|Nifty 50">
+                    <option value="NSE_INDEX|Nifty Bank">
+                    <option value="NSE_INDEX|Nifty IT">
+                    <option value="NSE_EQ|RELIANCE-EQ">
+                    <option value="NSE_EQ|TCS-EQ">
+                    <option value="NSE_EQ|INFY-EQ">
+                </datalist>
+                <select id="mode-select">
+                    <option value="ltpc">LTPC</option>
+                    <option value="option_greeks">Option Greeks</option>
+                    <option value="full" selected>Full</option>
+                    <option value="full_d30">Full D30 (Plus)</option>
+                </select>
+                <button onclick="subscribe()" id="subscribe-btn">📡 Subscribe</button>
+                <button onclick="reconnectWebSocket()">🔄 Reconnect WS</button>
+            </div>
+        </div>
+
+        <div id="data-container" class="data-grid">
+            <div class="no-data">
+                🔌 Connecting to WebSocket...<br>
+                <small>Real-time data will appear here</small>
+            </div>
+        </div>
+
+        <div class="log-container">
+            <h3>📝 Activity Log</h3>
+            <div id="log-entries"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        const WS_URL = 'ws://localhost:8000/ws';
+        
+        let ws = null;
+        let instruments = {};
+        let messageCount = 0;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+
+        // Initialize
+        window.addEventListener('load', () => {
+            addLog('🚀 Dashboard loaded');
+            connectWebSocket();
+        });
+
+        // Add log
+        function addLog(message) {
+            const logEntries = document.getElementById('log-entries');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span style="color:#666">[${time}]</span> ${message}`;
+            logEntries.insertBefore(entry, logEntries.firstChild);
+            
+            while (logEntries.children.length > 50) {
+                logEntries.removeChild(logEntries.lastChild);
+            }
+        }
+
+        // Connect WebSocket
+        function connectWebSocket() {
+            try {
+                addLog('🔌 Connecting to WebSocket...');
+                updateWSStatus('Connecting', 'connecting');
+                
+                ws = new WebSocket(WS_URL);
+                
+                ws.onopen = () => {
+                    addLog('✅ WebSocket connected!');
+                    updateWSStatus('Connected', 'connected');
+                    reconnectAttempts = 0;
+                };
+                
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleWebSocketMessage(data);
+                    } catch (e) {
+                        console.error('Parse error:', e);
+                    }
+                };
+                
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    addLog('❌ WebSocket error');
+                    updateWSStatus('Error', 'disconnected');
+                };
+                
+                ws.onclose = () => {
+                    addLog('🔴 WebSocket closed');
+                    updateWSStatus('Disconnected', 'disconnected');
+                    
+                    // Auto reconnect
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                        addLog(`⏳ Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`);
+                        setTimeout(connectWebSocket, delay);
+                    } else {
+                        addLog('❌ Max reconnection attempts reached. Click "Reconnect WS" button.');
+                    }
+                };
+                
+            } catch (error) {
+                console.error('Connection error:', error);
+                addLog(`❌ Connection failed: ${error.message}`);
+            }
+        }
+
+        // Handle WebSocket messages
+        function handleWebSocketMessage(data) {
+            const type = data.type;
+            
+            if (type === 'status') {
+                handleStatusUpdate(data);
+            } else if (type === 'live_feed') {
+                handleLiveFeed(data);
+            } else if (type === 'market_info') {
+                addLog('📊 Market info received');
+            } else if (type === 'ping') {
+                // Ping received, connection alive
+            }
+        }
+
+        // Handle status update
+        function handleStatusUpdate(data) {
+            const status = data.data || data;
+            
+            if (status.connected !== undefined) {
+                const badge = document.getElementById('status-badge');
+                if (status.connected) {
+                    badge.textContent = 'Connected';
+                    badge.className = 'status-badge status-connected';
+                } else {
+                    badge.textContent = 'Disconnected';
+                    badge.className = 'status-badge status-disconnected';
+                }
+            }
+            
+            if (status.subscriptions !== undefined) {
+                document.getElementById('subscription-count').textContent = status.subscriptions;
+            }
+            if (status.total_messages !== undefined) {
+                document.getElementById('message-count').textContent = status.total_messages;
+            }
+        }
+
+        // Handle live feed data
+        function handleLiveFeed(data) {
+            messageCount++;
+            
+            // Update last update time
+            const now = new Date();
+            document.getElementById('last-update').textContent = now.toLocaleTimeString();
+            
+            // Handle the actual API response structure
+            if (data.feeds) {
+                // Process each instrument in feeds
+                Object.entries(data.feeds).forEach(([instrument, feedData]) => {
+                    if (!instruments[instrument]) {
+                        instruments[instrument] = { mode: 'unknown', data: feedData };
+                    } else {
+                        instruments[instrument].data = feedData;
+                    }
+                });
+            } else {
+                // Fallback for old format
+                const instrument = data.instrument;
+                const feedData = data.data;
+                if (!instruments[instrument]) {
+                    instruments[instrument] = { mode: 'unknown', data: feedData };
+                } else {
+                    instruments[instrument].data = feedData;
+                }
+            }
+            
+            // Update display
+            updateDisplay();
+        }
+
+        // Update WS status
+        function updateWSStatus(text, status) {
+            const el = document.getElementById('ws-status');
+            el.textContent = text;
+            el.className = 'stat-value';
+            
+            if (status === 'connected') {
+                el.style.color = '#10b981';
+            } else if (status === 'connecting') {
+                el.style.color = '#f59e0b';
+            } else {
+                el.style.color = '#ef4444';
+            }
+        }
+
+        // Subscribe
+        async function subscribe() {
+            const input = document.getElementById('instrument-input');
+            const modeSelect = document.getElementById('mode-select');
+            const btn = document.getElementById('subscribe-btn');
+            
+            const instrument = input.value.trim();
+            const mode = modeSelect.value;
+            
+            if (!instrument) {
+                alert('Please enter an instrument key');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '⏳ Subscribing...';
+
+            try {
+                const response = await fetch(`${API_BASE}/subscribe`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ instruments: [instrument], mode: mode })
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                addLog(`✅ Subscribed: ${instrument} (${mode})`);
+                
+                // Add to instruments
+                instruments[instrument] = { mode: mode, data: {} };
+                
+                input.value = '';
+                updateDisplay();
+                
+            } catch (error) {
+                console.error('Subscribe error:', error);
+                addLog(`❌ Subscribe failed: ${error.message}`);
+                alert('Subscribe failed! Check:\n1. API server running?\n2. Valid access token?\n3. Correct instrument key?');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📡 Subscribe';
+            }
+        }
+
+        // Unsubscribe
+        async function unsubscribe(instrument) {
+            try {
+                const response = await fetch(`${API_BASE}/unsubscribe`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ instruments: [instrument] })
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                addLog(`🔴 Unsubscribed: ${instrument}`);
+                delete instruments[instrument];
+                updateDisplay();
+                
+            } catch (error) {
+                console.error('Unsubscribe error:', error);
+                addLog(`❌ Unsubscribe failed: ${error.message}`);
+            }
+        }
+
+        // Reconnect WebSocket
+        function reconnectWebSocket() {
+            if (ws) {
+                ws.close();
+            }
+            reconnectAttempts = 0;
+            connectWebSocket();
+        }
+
+        // Update display
+        function updateDisplay() {
+            const container = document.getElementById('data-container');
+            
+            if (Object.keys(instruments).length === 0) {
+                container.innerHTML = '<div class="no-data">👆 Subscribe to instruments to see live data</div>';
+                return;
+            }
+            
+            container.innerHTML = '';
+            
+            Object.entries(instruments).forEach(([key, value]) => {
+                const card = createInstrumentCard(key, value);
+                container.appendChild(card);
+            });
+        }
+
+        // Create instrument card
+        function createInstrumentCard(instrumentKey, instrumentData) {
+            const card = document.createElement('div');
+            card.className = 'instrument-card';
+            
+            const data = instrumentData.data || {};
+            const ltpc = data.ltpc || {};
+            const ltp = ltpc.ltp || 0;
+            const cp = ltpc.cp || 0;
+            const change = ltp - cp;
+            const changePercent = cp ? ((change / cp) * 100).toFixed(2) : 0;
+            
+            let html = `
+                <div class="instrument-header">
+                    <div class="instrument-name">${instrumentKey}</div>
+                    <div style="display: flex; gap: 10px;">
+                        <span class="instrument-mode">${instrumentData.mode.toUpperCase()}</span>
+                        <button class="remove-btn" onclick="unsubscribe('${instrumentKey}')">✕</button>
+                    </div>
+                </div>
+            `;
+            
+            if (ltp) {
+                html += `
+                    <div class="price-display">
+                        <div class="ltp">₹${ltp.toFixed(2)}</div>
+                        <div class="change ${change >= 0 ? 'positive' : 'negative'}">
+                            ${change >= 0 ? '▲' : '▼'} ${Math.abs(change).toFixed(2)} (${changePercent}%)
+                        </div>
+                    </div>
+                `;
+            }
+            
+            if (ltpc.ltq) {
+                html += `<div class="data-row"><span class="data-label">Last Qty</span><span class="data-value">${ltpc.ltq}</span></div>`;
+            }
+            
+            if (ltpc.ltt) {
+                const time = new Date(parseInt(ltpc.ltt)).toLocaleTimeString();
+                html += `<div class="data-row"><span class="data-label">Last Time</span><span class="data-value">${time}</span></div>`;
+            }
+            
+            // Full feed data
+            if (data.fullFeed && data.fullFeed.marketFF) {
+                const ff = data.fullFeed.marketFF;
+                
+                if (ff.vtt) html += `<div class="data-row"><span class="data-label">Volume</span><span class="data-value">${ff.vtt}</span></div>`;
+                if (ff.oi) html += `<div class="data-row"><span class="data-label">OI</span><span class="data-value">${ff.oi}</span></div>`;
+                if (ff.atp) html += `<div class="data-row"><span class="data-label">Avg Price</span><span class="data-value">₹${ff.atp.toFixed(2)}</span></div>`;
+                
+                // Market depth
+                if (ff.marketLevel?.bidAskQuote?.length > 0) {
+                    html += `<div class="market-depth">
+                        <div class="depth-title">📈 Market Depth</div>
+                        <div class="depth-row">
+                            <div class="depth-header">Bid Qty</div>
+                            <div class="depth-header">Bid</div>
+                            <div class="depth-header">Ask</div>
+                            <div class="depth-header">Ask Qty</div>
+                        </div>`;
+                    
+                    ff.marketLevel.bidAskQuote.slice(0, 5).forEach(q => {
+                        html += `<div class="depth-row">
+                            <div>${q.bidQ || '-'}</div>
+                            <div class="bid-price">₹${q.bidP ? q.bidP.toFixed(2) : '-'}</div>
+                            <div class="ask-price">₹${q.askP ? q.askP.toFixed(2) : '-'}</div>
+                            <div>${q.askQ || '-'}</div>
+                        </div>`;
+                    });
+                    
+                    html += `</div>`;
+                }
+            }
+            
+            card.innerHTML = html;
+            return card;
+        }
+
+        // Handle Enter key
+        document.getElementById('instrument-input')?.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') subscribe();
+        });
+    </script>
+</body>
+</html>
