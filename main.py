@@ -1,11 +1,8 @@
 """
-Upstox WebSocket Server with Real Data Broadcasting
+Upstox WebSocket Server - Fixed Startup Issue
 
-Install:
-pip install fastapi uvicorn websockets protobuf requests python-multipart
-
-Run:
-python upstox_server_realdata.py
+Problem: ws_client was None because startup() wasn't running properly
+Solution: Proper async initialization
 """
 
 import asyncio
@@ -14,28 +11,35 @@ import ssl
 import websockets
 import requests
 from datetime import datetime
-from typing import List, Optional, Dict, Set
+from typing import List, Optional, Dict
 import logging
 from collections import defaultdict
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import uvicorn
 
-# Import protobuf (you need MarketDataFeedV3_pb2.py)
+# Protobuf
 try:
     import MarketDataFeedV3_pb2 as pb
     from google.protobuf.json_format import MessageToDict
     PROTOBUF_AVAILABLE = True
 except ImportError:
     PROTOBUF_AVAILABLE = False
-    logging.warning("Protobuf not available. Running in demo mode.")
+    logging.warning("⚠️  Protobuf not available")
 
 # Logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+
+# ============= Config =============
+# 👇 உங்கள் access token இங்கே போடுங்க
+ACCESS_TOKEN = "YOUR_ACCESS_TOKEN_HERE"
 
 
 # ============= Pydantic Models =============
@@ -58,36 +62,42 @@ class ModeChangeRequest(BaseModel):
 # ============= Connection Manager =============
 
 class ConnectionManager:
-    """Manage WebSocket connections to dashboard clients"""
+    """Manage dashboard WebSocket connections"""
     
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.lock = asyncio.Lock()
     
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"✅ Dashboard client connected. Total: {len(self.active_connections)}")
+        async with self.lock:
+            self.active_connections.append(websocket)
+        logger.info(f"✅ Dashboard connected. Total: {len(self.active_connections)}")
     
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        logger.info(f"❌ Dashboard client disconnected. Total: {len(self.active_connections)}")
+    async def disconnect(self, websocket: WebSocket):
+        async with self.lock:
+            if websocket in self.active_connections:
+                self.active_connections.remove(websocket)
+        logger.info(f"❌ Dashboard disconnected. Total: {len(self.active_connections)}")
     
     async def broadcast(self, message: dict):
-        """Broadcast data to all connected dashboard clients"""
+        """Broadcast to all dashboards"""
         if not self.active_connections:
             return
         
         disconnected = []
-        for connection in self.active_connections:
+        async with self.lock:
+            connections = self.active_connections.copy()
+        
+        for connection in connections:
             try:
                 await connection.send_json(message)
             except Exception as e:
-                logger.error(f"Error sending to client: {e}")
+                logger.error(f"Broadcast error: {e}")
                 disconnected.append(connection)
         
-        # Remove disconnected clients
         for conn in disconnected:
-            self.disconnect(conn)
+            await self.disconnect(conn)
 
 
 manager = ConnectionManager()
@@ -96,32 +106,26 @@ manager = ConnectionManager()
 # ============= Upstox WebSocket Client =============
 
 class UpstoxWebSocketClient:
-    """Real Upstox WebSocket client with data broadcasting"""
+    """Upstox WebSocket client"""
     
     def __init__(self, access_token: str):
         self.access_token = access_token
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.is_connected = False
-        self.should_reconnect = True
+        self.should_run = True
         
-        # Subscriptions
-        self.subscribed_instruments = {}  # {instrument: mode}
+        self.subscribed_instruments = {}
+        self.latest_data = {}
         
-        # Stats
         self.total_messages = 0
         self.reconnection_count = 0
         self.connection_start_time = None
         self.last_message_time = None
         
-        # Latest data cache
-        self.latest_data = {}  # {instrument: latest_feed_data}
-        
-        # SSL
         self.ssl_context = ssl.create_default_context()
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
         
-        # Reconnection
         self.max_retries = 10
         self.base_retry_delay = 2
         self.current_retry = 0
@@ -134,13 +138,9 @@ class UpstoxWebSocketClient:
         }
         url = 'https://api.upstox.com/v3/feed/market-data-feed/authorize'
         
-        try:
-            response = requests.get(url=url, headers=headers)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"❌ Authorization failed: {e}")
-            raise
+        response = requests.get(url=url, headers=headers, timeout=10)
+        response.raise_for_status()
+        return response.json()
     
     def decode_protobuf(self, buffer):
         """Decode protobuf"""
@@ -155,10 +155,10 @@ class UpstoxWebSocketClient:
             logger.error(f"Decode error: {e}")
             return None
     
-    async def send_subscription(self, instruments: List[str], mode: str, method: str):
-        """Send subscription request"""
+    async def send_message(self, instruments: List[str], mode: str, method: str):
+        """Send WebSocket message"""
         if not self.websocket or not self.is_connected:
-            logger.warning("WebSocket not connected")
+            logger.warning("⚠️  Not connected")
             return False
         
         try:
@@ -171,36 +171,37 @@ class UpstoxWebSocketClient:
                 }
             }
             
-            binary_data = json.dumps(data).encode('utf-8')
-            await self.websocket.send(binary_data)
-            logger.info(f"✅ Sent {method} for {len(instruments)} instruments")
+            await self.websocket.send(json.dumps(data).encode('utf-8'))
+            logger.info(f"✅ Sent {method}: {len(instruments)} instruments")
             return True
             
         except Exception as e:
-            logger.error(f"Send error: {e}")
+            logger.error(f"❌ Send error: {e}")
             return False
     
     async def subscribe(self, instruments: List[str], mode: str):
         """Subscribe"""
-        success = await self.send_subscription(instruments, mode, 'sub')
+        success = await self.send_message(instruments, mode, 'sub')
         if success:
             for inst in instruments:
                 self.subscribed_instruments[inst] = mode
+                logger.info(f"📊 Subscribed: {inst} ({mode})")
         return success
     
     async def unsubscribe(self, instruments: List[str]):
         """Unsubscribe"""
         mode = list(self.subscribed_instruments.values())[0] if self.subscribed_instruments else 'full'
-        success = await self.send_subscription(instruments, mode, 'unsub')
+        success = await self.send_message(instruments, mode, 'unsub')
         if success:
             for inst in instruments:
                 self.subscribed_instruments.pop(inst, None)
                 self.latest_data.pop(inst, None)
+                logger.info(f"🔴 Unsubscribed: {inst}")
         return success
     
     async def change_mode(self, instruments: List[str], new_mode: str):
         """Change mode"""
-        success = await self.send_subscription(instruments, new_mode, 'change_mode')
+        success = await self.send_message(instruments, new_mode, 'change_mode')
         if success:
             for inst in instruments:
                 if inst in self.subscribed_instruments:
@@ -212,7 +213,7 @@ class UpstoxWebSocketClient:
         if not self.subscribed_instruments:
             return
         
-        logger.info(f"🔄 Resubscribing to {len(self.subscribed_instruments)} instruments...")
+        logger.info(f"🔄 Resubscribing {len(self.subscribed_instruments)} instruments...")
         
         mode_groups = defaultdict(list)
         for inst, mode in self.subscribed_instruments.items():
@@ -223,14 +224,14 @@ class UpstoxWebSocketClient:
             await asyncio.sleep(0.5)
     
     async def connect(self):
-        """Connect to Upstox WebSocket"""
-        while self.should_reconnect and self.current_retry < self.max_retries:
+        """Connect to Upstox"""
+        while self.should_run and self.current_retry < self.max_retries:
             try:
                 logger.info("🔐 Getting authorization...")
                 auth_response = self.get_authorization()
                 ws_url = auth_response["data"]["authorized_redirect_uri"]
                 
-                logger.info("📡 Connecting to Upstox...")
+                logger.info("📡 Connecting to Upstox WebSocket...")
                 self.websocket = await websockets.connect(
                     ws_url,
                     ssl=self.ssl_context,
@@ -242,30 +243,30 @@ class UpstoxWebSocketClient:
                 self.current_retry = 0
                 self.connection_start_time = datetime.now()
                 
-                logger.info("✅ Connected to Upstox WebSocket!")
+                logger.info("✅ Connected to Upstox!")
                 return True
                 
             except Exception as e:
                 self.is_connected = False
                 self.current_retry += 1
-                logger.error(f"Connection failed (attempt {self.current_retry}): {e}")
+                logger.error(f"❌ Connection failed (attempt {self.current_retry}): {e}")
                 
                 if self.current_retry >= self.max_retries:
-                    logger.error("Max retries reached")
+                    logger.error("❌ Max retries reached")
                     return False
                 
                 retry_delay = min(self.base_retry_delay * (2 ** (self.current_retry - 1)), 60)
-                logger.info(f"Retrying in {retry_delay}s...")
+                logger.info(f"⏳ Retrying in {retry_delay}s...")
                 await asyncio.sleep(retry_delay)
         
         return False
     
     async def receive_and_broadcast(self):
-        """Receive data and broadcast to dashboard clients"""
+        """Receive and broadcast data"""
         message_count = 0
         
         try:
-            while self.is_connected:
+            while self.is_connected and self.should_run:
                 try:
                     message = await asyncio.wait_for(
                         self.websocket.recv(),
@@ -282,7 +283,7 @@ class UpstoxWebSocketClient:
                     message_count += 1
                     self.total_messages += 1
                     
-                    # Handle different message types
+                    # Market info
                     if message_count == 1 and data_dict.get('type') == 'market_info':
                         logger.info("📊 Market info received")
                         await manager.broadcast({
@@ -291,45 +292,56 @@ class UpstoxWebSocketClient:
                         })
                         continue
                     
+                    # Snapshot
                     if message_count == 2:
-                        logger.info("📸 Initial snapshot received")
+                        logger.info("📸 Snapshot received")
                     
-                    # Process live feed
+                    # Live feed
                     if 'feeds' in data_dict:
                         for instrument_key, feed_data in data_dict['feeds'].items():
-                            # Cache latest data
                             self.latest_data[instrument_key] = feed_data
                             
-                            # Broadcast to dashboard
+                            logger.info(f"💹 Live data: {instrument_key}")
+                            
                             await manager.broadcast({
                                 'type': 'live_feed',
                                 'instrument': instrument_key,
                                 'data': feed_data,
                                 'timestamp': datetime.now().isoformat()
                             })
+                            
+                            logger.debug(f"✅ Broadcasted to {len(manager.active_connections)} dashboards")
                 
                 except asyncio.TimeoutError:
-                    logger.warning("Message timeout")
-                    if not self.websocket or self.websocket.closed:
+                    # Check if connection is still alive
+                    try:
+                        pong = await self.websocket.ping()
+                        await asyncio.wait_for(pong, timeout=5)
+                        logger.debug("Connection alive (ping/pong OK)")
+                    except:
+                        logger.warning("⚠️  Connection lost")
                         break
                 
                 except websockets.exceptions.ConnectionClosed:
-                    logger.error("Connection closed")
+                    logger.error("❌ Connection closed")
                     break
         
         except Exception as e:
-            logger.error(f"Receive error: {e}")
+            logger.error(f"❌ Receive error: {e}")
         
         finally:
             self.is_connected = False
     
     async def run(self):
         """Main run loop"""
+        logger.info("🚀 Starting Upstox client...")
+        
         try:
-            while self.should_reconnect:
+            while self.should_run:
                 connected = await self.connect()
                 
                 if not connected:
+                    logger.error("❌ Failed to connect")
                     break
                 
                 await asyncio.sleep(1)
@@ -340,28 +352,35 @@ class UpstoxWebSocketClient:
                 
                 self.reconnection_count += 1
                 
-                # Broadcast connection status
+                # Broadcast status
                 await manager.broadcast({
                     'type': 'status',
-                    'connected': True,
-                    'subscriptions': len(self.subscribed_instruments)
+                    'data': self.get_status()
                 })
                 
-                # Start receiving
+                # Receive
                 await self.receive_and_broadcast()
                 
-                # Broadcast disconnection
+                # Disconnected
                 await manager.broadcast({
                     'type': 'status',
-                    'connected': False
+                    'data': {'connected': False}
                 })
                 
-                if self.should_reconnect:
+                if self.should_run:
+                    logger.info("🔄 Reconnecting in 2s...")
                     await asyncio.sleep(2)
         
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-            self.should_reconnect = False
+        except Exception as e:
+            logger.error(f"❌ Run error: {e}")
+        
+        logger.info("🛑 Client stopped")
+    
+    def stop(self):
+        """Stop client"""
+        self.should_run = False
+        if self.websocket:
+            asyncio.create_task(self.websocket.close())
     
     def get_status(self):
         """Get status"""
@@ -389,39 +408,13 @@ class UpstoxWebSocketClient:
 
 # ============= FastAPI App =============
 
-# Global client
-ws_client: Optional[UpstoxWebSocketClient] = None
-ws_task: Optional[asyncio.Task] = None
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global ws_client, ws_task
-    
-    # Startup
-    logger.info("🚀 Starting Upstox WebSocket Server")
-    # IMPORTANT: Replace with your actual access token
-    access_token = "YOUR_ACCESS_TOKEN_HERE"
-    ws_client = UpstoxWebSocketClient(access_token)
-    ws_task = asyncio.create_task(ws_client.run())
-    logger.info("✅ Server ready!")
-    
-    yield
-    
-    # Shutdown
-    logger.info("🛑 Server stopped")
-    if ws_client:
-        ws_client.should_reconnect = False
-    if ws_task:
-        ws_task.cancel()
-
-
 app = FastAPI(
     title="Upstox WebSocket Server",
-    version="1.0.0",
-    lifespan=lifespan
+    description="Real-time market data broadcasting",
+    version="1.0.0"
 )
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -430,40 +423,158 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global client
+ws_client: Optional[UpstoxWebSocketClient] = None
+client_task: Optional[asyncio.Task] = None
 
-# ============= REST Endpoints =============
+
+@app.on_event("startup")
+async def startup():
+    """Startup - இது தான் முக்கியம்!"""
+    global ws_client, client_task
+    
+    logger.info("=" * 70)
+    logger.info("🚀 Starting Upstox WebSocket Server")
+    logger.info("=" * 70)
+    
+    # Check token
+    if ACCESS_TOKEN == "YOUR_ACCESS_TOKEN_HERE":
+        logger.error("❌ ERROR: Access token not set!")
+        logger.error("   Fix: Update ACCESS_TOKEN at top of file")
+        logger.error("=" * 70)
+        # Don't exit - let server run for testing
+    else:
+        logger.info(f"✅ Token configured (length: {len(ACCESS_TOKEN)})")
+    
+    # Create client
+    try:
+        ws_client = UpstoxWebSocketClient(ACCESS_TOKEN)
+        logger.info("✅ Client created")
+        
+        # Start client in background
+        client_task = asyncio.create_task(ws_client.run())
+        logger.info("✅ Client task started")
+        
+        # Give it a moment to initialize
+        await asyncio.sleep(1)
+        
+        if ws_client.is_connected:
+            logger.info("✅ Client connected to Upstox!")
+        else:
+            logger.warning("⚠️  Client not yet connected (will retry)")
+        
+    except Exception as e:
+        logger.error(f"❌ Startup error: {e}")
+        logger.error("   Server will run but subscriptions will fail")
+    
+    logger.info("=" * 70)
+    logger.info("✅ Server ready!")
+    logger.info("=" * 70)
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Shutdown"""
+    global ws_client, client_task
+    
+    logger.info("🛑 Shutting down...")
+    
+    if ws_client:
+        ws_client.stop()
+    
+    if client_task:
+        client_task.cancel()
+        try:
+            await client_task
+        except asyncio.CancelledError:
+            pass
+    
+    logger.info("✅ Shutdown complete")
+
+
+# ============= Endpoints =============
 
 @app.get("/")
 async def root():
+    """Root endpoint"""
     return {
         "name": "Upstox WebSocket Server",
+        "version": "1.0.0",
         "status": "running",
-        "websocket": "/ws",
-        "endpoints": ["/status", "/subscribe", "/unsubscribe", "/token"]
+        "client_status": "connected" if (ws_client and ws_client.is_connected) else "disconnected",
+        "endpoints": {
+            "status": "GET /status",
+            "subscribe": "POST /subscribe",
+            "unsubscribe": "POST /unsubscribe",
+            "websocket": "WS /ws",
+            "docs": "GET /docs"
+        }
+    }
+
+
+@app.get("/health")
+async def health():
+    """Health check"""
+    if not ws_client:
+        return {
+            "status": "unhealthy",
+            "reason": "Client not initialized",
+            "fix": "Check server logs and access token"
+        }
+    
+    if not ws_client.is_connected:
+        return {
+            "status": "degraded",
+            "reason": "Client not connected to Upstox",
+            "subscriptions": len(ws_client.subscribed_instruments)
+        }
+    
+    return {
+        "status": "healthy",
+        "connected": True,
+        "subscriptions": len(ws_client.subscribed_instruments)
     }
 
 
 @app.get("/status")
 async def get_status():
+    """Get status"""
     if not ws_client:
-        raise HTTPException(status_code=503, detail="Client not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Client not initialized",
+                "fix": "Check server logs. Token might be invalid or startup failed."
+            }
+        )
+    
     return ws_client.get_status()
 
 
 @app.put("/token")
 async def update_token(token_data: TokenUpdate):
+    """Update token"""
     if not ws_client:
         raise HTTPException(status_code=503, detail="Client not initialized")
+    
     ws_client.update_token(token_data.access_token)
-    return {"status": "success", "message": "Token updated"}
+    return {"status": "success", "message": "Token updated. Reconnecting..."}
 
 
 @app.post("/subscribe")
 async def subscribe(sub_req: SubscriptionRequest):
+    """Subscribe"""
     if not ws_client:
-        raise HTTPException(status_code=503, detail="Client not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail="Client not initialized. Check /health endpoint."
+        )
+    
     if not ws_client.is_connected:
-        raise HTTPException(status_code=503, detail="Not connected")
+        raise HTTPException(
+            status_code=503,
+            detail="Not connected to Upstox. Client is reconnecting..."
+        )
     
     success = await ws_client.subscribe(sub_req.instruments, sub_req.mode)
     
@@ -476,64 +587,45 @@ async def subscribe(sub_req: SubscriptionRequest):
 
 @app.post("/unsubscribe")
 async def unsubscribe(unsub_req: UnsubscriptionRequest):
+    """Unsubscribe"""
     if not ws_client:
         raise HTTPException(status_code=503, detail="Client not initialized")
+    
     if not ws_client.is_connected:
         raise HTTPException(status_code=503, detail="Not connected")
     
     success = await ws_client.unsubscribe(unsub_req.instruments)
-    
-    return {
-        "status": "success" if success else "failed",
-        "instruments": unsub_req.instruments
-    }
+    return {"status": "success" if success else "failed"}
 
 
 @app.post("/change-mode")
 async def change_mode(mode_req: ModeChangeRequest):
+    """Change mode"""
     if not ws_client:
         raise HTTPException(status_code=503, detail="Client not initialized")
+    
     if not ws_client.is_connected:
         raise HTTPException(status_code=503, detail="Not connected")
     
     success = await ws_client.change_mode(mode_req.instruments, mode_req.new_mode)
-    
-    return {
-        "status": "success" if success else "failed",
-        "instruments": mode_req.instruments,
-        "new_mode": mode_req.new_mode
-    }
+    return {"status": "success" if success else "failed"}
 
 
 @app.get("/subscriptions")
 async def get_subscriptions():
+    """Get subscriptions"""
     if not ws_client:
         raise HTTPException(status_code=503, detail="Client not initialized")
+    
     return {
         "total": len(ws_client.subscribed_instruments),
         "subscriptions": ws_client.subscribed_instruments
     }
 
 
-@app.get("/latest-data")
-async def get_latest_data():
-    """Get latest cached data for all instruments"""
-    if not ws_client:
-        raise HTTPException(status_code=503, detail="Client not initialized")
-    return {
-        "instruments": ws_client.latest_data
-    }
-
-
-# ============= WebSocket Endpoint for Real-time Data =============
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint for dashboard to receive real-time data
-    
-    Dashboard connects here to get live market updates
-    """
+    """WebSocket for dashboard"""
     await manager.connect(websocket)
     
     try:
@@ -544,7 +636,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 'data': ws_client.get_status()
             })
             
-            # Send latest cached data
+            # Send cached data
             for instrument, data in ws_client.latest_data.items():
                 await websocket.send_json({
                     'type': 'live_feed',
@@ -552,36 +644,48 @@ async def websocket_endpoint(websocket: WebSocket):
                     'data': data
                 })
         
-        # Keep connection alive
+        # Keep alive
         while True:
-            # Receive any messages from client (like ping)
             try:
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-                # Echo back or handle client messages
+                await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
             except asyncio.TimeoutError:
-                # Send ping to keep alive
                 await websocket.send_json({'type': 'ping'})
                 
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)
 
+
+# ============= Main =============
 
 if __name__ == "__main__":
+    print("\n" + "=" * 70)
+    print("🚀 Upstox WebSocket Server with Real Data")
     print("=" * 70)
-    print("🚀 Upstox WebSocket Server with Real Data Broadcasting")
-    print("=" * 70)
     print()
-    print("📡 HTTP API:  http://localhost:8000")
-    print("🔌 WebSocket: ws://localhost:8000/ws")
-    print("📚 API Docs:  http://localhost:8000/docs")
+    print("📡 API Server:  http://localhost:8000")
+    print("🔌 WebSocket:   ws://localhost:8000/ws")
+    print("📚 API Docs:    http://localhost:8000/docs")
+    print("❤️  Health:      http://localhost:8000/health")
     print()
-    print("⚠️  IMPORTANT: Update access_token in startup() function!")
-    print()
+    
+    if ACCESS_TOKEN == "YOUR_ACCESS_TOKEN_HERE":
+        print("⚠️  WARNING: Access token not configured!")
+        print("   Edit file and update ACCESS_TOKEN variable")
+        print()
+    else:
+        print(f"✅ Token: {ACCESS_TOKEN[:20]}...{ACCESS_TOKEN[-10:]}")
+        print()
+    
     print("Press Ctrl+C to stop")
     print("=" * 70)
     print()
     
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )

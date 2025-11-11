@@ -355,6 +355,7 @@
                 ws.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
+                        console.log('📨 WebSocket message:', data.type, data); // Debug log
                         handleWebSocketMessage(data);
                     } catch (e) {
                         console.error('Parse error:', e);
@@ -428,31 +429,20 @@
 
         // Handle live feed data
         function handleLiveFeed(data) {
+            const instrument = data.instrument;
+            const feedData = data.data;
+            
             messageCount++;
             
             // Update last update time
             const now = new Date();
             document.getElementById('last-update').textContent = now.toLocaleTimeString();
             
-            // Handle the actual API response structure
-            if (data.feeds) {
-                // Process each instrument in feeds
-                Object.entries(data.feeds).forEach(([instrument, feedData]) => {
-                    if (!instruments[instrument]) {
-                        instruments[instrument] = { mode: 'unknown', data: feedData };
-                    } else {
-                        instruments[instrument].data = feedData;
-                    }
-                });
+            // Store/update instrument data
+            if (!instruments[instrument]) {
+                instruments[instrument] = { mode: 'unknown', data: feedData };
             } else {
-                // Fallback for old format
-                const instrument = data.instrument;
-                const feedData = data.data;
-                if (!instruments[instrument]) {
-                    instruments[instrument] = { mode: 'unknown', data: feedData };
-                } else {
-                    instruments[instrument].data = feedData;
-                }
+                instruments[instrument].data = feedData;
             }
             
             // Update display
@@ -490,29 +480,84 @@
 
             btn.disabled = true;
             btn.textContent = '⏳ Subscribing...';
+            addLog(`⏳ Subscribing to ${instrument}...`);
 
             try {
+                // First check server health
+                const healthResponse = await fetch(`${API_BASE}/health`);
+                const health = await healthResponse.json();
+                
+                if (health.status !== 'healthy') {
+                    throw new Error(`Server not healthy: ${health.reason || 'Unknown'}`);
+                }
+                
+                // Now subscribe
                 const response = await fetch(`${API_BASE}/subscribe`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ instruments: [instrument], mode: mode })
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify({ 
+                        instruments: [instrument], 
+                        mode: mode 
+                    })
                 });
 
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
                 const data = await response.json();
-                addLog(`✅ Subscribed: ${instrument} (${mode})`);
                 
-                // Add to instruments
-                instruments[instrument] = { mode: mode, data: {} };
+                if (!response.ok) {
+                    // Show detailed error
+                    const errorMsg = data.detail || data.message || `HTTP ${response.status}`;
+                    throw new Error(errorMsg);
+                }
                 
-                input.value = '';
-                updateDisplay();
+                if (data.status === 'success') {
+                    addLog(`✅ Subscribed: ${instrument} (${mode})`);
+                    
+                    // Add to instruments with initial empty data
+                    instruments[instrument] = { 
+                        mode: mode, 
+                        data: {
+                            ltpc: {
+                                ltp: 0,
+                                cp: 0,
+                                ltq: '0',
+                                ltt: Date.now().toString()
+                            }
+                        }
+                    };
+                    
+                    input.value = '';
+                    updateDisplay();
+                    
+                    // Start auto-refresh if not already running
+                    if (!statusCheckInterval) {
+                        startAutoRefresh();
+                    }
+                } else {
+                    throw new Error(data.message || 'Subscription failed');
+                }
                 
             } catch (error) {
                 console.error('Subscribe error:', error);
                 addLog(`❌ Subscribe failed: ${error.message}`);
-                alert('Subscribe failed! Check:\n1. API server running?\n2. Valid access token?\n3. Correct instrument key?');
+                
+                // Better error messages
+                let errorDetails = error.message;
+                let fixSuggestion = '';
+                
+                if (errorDetails.includes('Client not initialized')) {
+                    fixSuggestion = '\n\nFix:\n1. Check server logs\n2. Update ACCESS_TOKEN in server code\n3. Restart server';
+                } else if (errorDetails.includes('Not connected')) {
+                    fixSuggestion = '\n\nFix:\n1. Token might be expired\n2. Check internet connection\n3. Check server logs for connection errors';
+                } else if (errorDetails.includes('Failed to fetch') || errorDetails.includes('NetworkError')) {
+                    fixSuggestion = '\n\nFix:\n1. Is server running on port 8000?\n2. Check: http://localhost:8000/health\n3. CORS enabled?';
+                } else if (errorDetails.includes('503')) {
+                    fixSuggestion = '\n\nFix:\n1. Server not ready yet\n2. Check /health endpoint\n3. Wait a moment and retry';
+                }
+                
+                alert(`❌ Subscribe Failed!\n\nError: ${errorDetails}${fixSuggestion}`);
             } finally {
                 btn.disabled = false;
                 btn.textContent = '📡 Subscribe';
@@ -609,7 +654,7 @@
             }
             
             // Full feed data
-            if (data.fullFeed && data.fullFeed.marketFF) {
+            if (data.fullFeed) {
                 const ff = data.fullFeed.marketFF;
                 
                 if (ff.vtt) html += `<div class="data-row"><span class="data-label">Volume</span><span class="data-value">${ff.vtt}</span></div>`;
